@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { MENU_BASE, esHuevosAlGusto } from "../menuBase";
+import { supabase } from "../supabaseClient";
 
 // ─── PRECIO ICOPOR ───────────────────────────────────────────────────────────
 const PRECIO_ICOPOR = 500;
@@ -44,7 +45,7 @@ function Caja({
   caldosDelDia = [],
   huevosPrep = [],
 }) {
-  // Menú base con precios (editable) — el menú visible se arma del inicio de día
+  // Menú base con precios (editable)
   const [menuBase, setMenuBase] = useState(MENU_BASE);
 
   // Agrega al menú base las proteínas/caldos nuevos que se ingresaron hoy
@@ -96,7 +97,7 @@ function Caja({
   const menu = {
     desayuno: {
       caldos: menuBase.desayuno.caldos.filter((c) =>
-        caldosDelDia.some((x) => x.id === c.id),
+        caldosDelDia.some((x) => x.id === c.id)
       ),
       bandeja: conPrep(menuBase.desayuno.bandeja),
       bebidas: menuBase.desayuno.bebidas,
@@ -114,6 +115,7 @@ function Caja({
       corriente: conPrep(menuBase.almuerzo.corriente),
     },
   };
+
   const [servicio, setServicio] = useState(null);
   const [ticket, setTicket] = useState([]);
   const [item, setItem] = useState(itemVacio());
@@ -125,8 +127,7 @@ function Caja({
   const [precioEdit, setPrecioEdit] = useState("");
   const [cobrado, setCobrado] = useState(false);
   const [stock, setStock] = useState(buildStockInicial());
-  const [stockConfigurado, setStockConfigurado] = useState(false);
-  const [stockTemp, setStockTemp] = useState({});
+  const [stockConfigurado] = useState(false);
   const [pedidoCobrado, setPedidoCobrado] = useState(null);
 
   // Factura electrónica
@@ -187,7 +188,7 @@ function Caja({
       if (item.caldo) partes.push(item.caldo.name);
       if (item.bandeja)
         partes.push(
-          item.bandeja.name + (item.huevosPrep ? ` (${item.huevosPrep})` : ""),
+          item.bandeja.name + (item.huevosPrep ? ` (${item.huevosPrep})` : "")
         );
       if (item.bebidaD) partes.push(item.bebidaD.name);
 
@@ -202,13 +203,13 @@ function Caja({
           item.proteina.name +
             (item.proteina.preparacion
               ? ` (${item.proteina.preparacion})`
-              : ""),
+              : "")
         );
       if (item.principios.length > 0)
         partes.push(
           item.mixto
             ? `Mixto (${item.principios.map((p) => p.name).join("/")})`
-            : item.principios[0].name,
+            : item.principios[0].name
         );
       if (item.bebidaA) partes.push(item.bebidaA.name);
       return partes.join(" + ") || "—";
@@ -228,7 +229,6 @@ function Caja({
     if (precio === 0) return;
     if (faltaPrepHuevos) return;
 
-    // Metadatos para icopor y balance
     const tieneSopa = servicio === "almuerzo" && item.conSopa && !item.soloSopa;
     const tieneBandeja =
       servicio === "almuerzo" && !item.soloSopa && !!item.proteina;
@@ -274,7 +274,7 @@ function Caja({
     const nuevo = parseFloat(precioEdit);
     if (!isNaN(nuevo) && nuevo >= 0)
       setTicket((prev) =>
-        prev.map((t) => (t.id === id ? { ...t, precio: nuevo } : t)),
+        prev.map((t) => (t.id === id ? { ...t, precio: nuevo } : t))
       );
     setEditIdx(null);
   };
@@ -282,7 +282,7 @@ function Caja({
   const limpiar = () => {
     if (ticket.length > 0) {
       const confirmar = window.confirm(
-        "¿Seguro que quieres cancelar este pedido? Se perderán los ítems agregados.",
+        "¿Seguro que quieres cancelar este pedido? Se perderán los ítems agregados."
       );
       if (!confirmar) return;
     }
@@ -296,12 +296,66 @@ function Caja({
     setServicio(null);
   };
 
+  // ─── ACUMULAR VENTA EN EL TURNO ACTIVO DE SUPABASE ───────────────────────
+  const registrarVentaEnTurno = async (monto, medioPago, itemsTicket, numPedido) => {
+    try {
+      // 1. Buscamos el turno abierto actual para asociar la venta
+      const { data: turnoAbierto } = await supabase
+        .from("cajas_turnos")
+        .select("id, total_ventas_efectivo, total_ventas_tarjeta, total_ventas_transferencia")
+        .eq("estado", "abierta")
+        .order("fecha_apertura", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!turnoAbierto) {
+        console.warn("No hay un turno abierto en la BD.");
+        return;
+      }
+
+      // 2. Insertamos el NUEVO REGISTRO INDIVIDUAL en la tabla de ventas detalladas
+      await supabase.from("ventas_detalladas").insert([
+        {
+          turno_id: turnoAbierto.id,
+          numero_pedido: numPedido,
+          total: monto,
+          tipo_pago: medioPago,
+          detalle_items: itemsTicket, // Guarda los platos del ticket
+        },
+      ]);
+
+      // 3. (Opcional pero útil) Actualizamos también los acumulados generales del turno en cajas_turnos
+      let colEfectivo = Number(turnoAbierto.total_ventas_efectivo) || 0;
+      let colTarjeta = Number(turnoAbierto.total_ventas_tarjeta) || 0;
+      let colTransf = Number(turnoAbierto.total_ventas_transferencia) || 0;
+
+      if (medioPago === "efectivo") colEfectivo += monto;
+      else if (medioPago === "nequi" || medioPago === "daviplata") colTransf += monto;
+      else colTarjeta += monto;
+
+      await supabase
+        .from("cajas_turnos")
+        .update({
+          total_ventas_efectivo: colEfectivo,
+          total_ventas_tarjeta: colTarjeta,
+          total_ventas_transferencia: colTransf,
+        })
+        .eq("id", turnoAbierto.id);
+
+    } catch (err) {
+      console.error("Error al registrar la venta detallada:", err);
+    }
+  };
+
   // ─── COBRAR ──────────────────────────────────────────────────────────────
-  const cobrar = () => {
+  const cobrar = async () => {
     if (!puedeCobrar) return;
 
+    // 1. Declarar la variable del número de pedido aquí arriba
+    const numPedidoStr = String(pedidoNum).padStart(5, "0");
+
     const snapshot = {
-      num: String(pedidoNum).padStart(5, "0"),
+      num: numPedidoStr,
       items: [...ticket],
       total: totalTicket,
       icopor: costoIcopor(),
@@ -312,7 +366,7 @@ function Caja({
       fecha: new Date().toLocaleString("es-CO"),
     };
 
-    // Descontar stock proteínas
+    // Descontar stock
     setStock((prev) => {
       const nuevo = { ...prev };
       ticket.forEach((t) => {
@@ -326,16 +380,21 @@ function Caja({
       return nuevo;
     });
 
+    // 2. Registrar la venta individual y sumar el acumulado del turno en Supabase
+    await registrarVentaEnTurno(totalTicket, tipoPago, ticket, numPedidoStr);
+
     // ── Notificar al App.js con todos los datos ──
-    onCobro({
-      monto: totalTicket,
-      pagoRecibido: tipoPago === "efectivo" ? pagoNum : totalTicket,
-      cambioEntregado: tipoPago === "efectivo" ? cambio : 0,
-      tipoPago,
-      proteinas: ticket
-        .filter((t) => t.proteina)
-        .map((t) => ({ id: t.proteina.id, name: t.proteina.name })),
-    });
+    if (onCobro) {
+      onCobro({
+        monto: totalTicket,
+        pagoRecibido: tipoPago === "efectivo" ? pagoNum : totalTicket,
+        cambioEntregado: tipoPago === "efectivo" ? cambio : 0,
+        tipoPago,
+        proteinas: ticket
+          .filter((t) => t.proteina)
+          .map((t) => ({ id: t.proteina.id, name: t.proteina.name })),
+      });
+    }
 
     setPedidoNum((n) => n + 1);
     setPedidoCobrado(snapshot);
@@ -397,18 +456,18 @@ function Caja({
       const nuevo = JSON.parse(JSON.stringify(prev));
       ["ejecutivo", "intermedio", "corriente"].forEach((cat) => {
         nuevo.almuerzo[cat] = nuevo.almuerzo[cat].map((p) =>
-          preciosTemp[p.id] ? { ...p, ...preciosTemp[p.id] } : p,
+          preciosTemp[p.id] ? { ...p, ...preciosTemp[p.id] } : p
         );
       });
       nuevo.desayuno.caldos = nuevo.desayuno.caldos.map((c) =>
         preciosTemp[c.id]
           ? { ...c, precio: parseFloat(preciosTemp[c.id].precio) || c.precio }
-          : c,
+          : c
       );
       nuevo.desayuno.bandeja = nuevo.desayuno.bandeja.map((b) =>
         preciosTemp[b.id]
           ? { ...b, precio: parseFloat(preciosTemp[b.id].precio) || b.precio }
-          : b,
+          : b
       );
       return nuevo;
     });
@@ -696,60 +755,6 @@ function Caja({
     </div>
   );
 
-  // ─── MODAL STOCK ─────────────────────────────────────────────────────────
-  const renderModalStock = () => (
-    <div className="modal-overlay open">
-      <div className="modal-box">
-        <div className="modal-title">Porciones disponibles hoy</div>
-        <div className="modal-sub">
-          Ingresa cuántas porciones hay de cada proteína al iniciar el día
-        </div>
-        {["ejecutivo", "intermedio", "corriente"].map((cat) => (
-          <div key={cat} style={{ marginBottom: "14px" }}>
-            <div className="section-label">
-              {cat.charAt(0).toUpperCase() + cat.slice(1)}
-            </div>
-            {MENU_BASE.almuerzo[cat].map((p) => (
-              <div
-                key={p.id}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "10px",
-                  marginBottom: "6px",
-                }}
-              >
-                <span style={{ flex: 1, fontSize: "13px" }}>{p.name}</span>
-                <input
-                  type="number"
-                  className="input-field"
-                  style={{
-                    width: "80px",
-                    textAlign: "center",
-                    fontFamily: "var(--fm)",
-                  }}
-                  placeholder="0"
-                  min="0"
-                  value={stockTemp[p.id] || ""}
-                  onChange={(e) =>
-                    setStockTemp((prev) => ({
-                      ...prev,
-                      [p.id]: e.target.value,
-                    }))
-                  }
-                />
-                <span style={{ fontSize: "11px", color: "var(--text3)" }}>
-                  porciones
-                </span>
-              </div>
-            ))}
-          </div>
-        ))}
-        <div className="modal-footer"></div>
-      </div>
-    </div>
-  );
-
   // ─── MODAL FACTURA ────────────────────────────────────────────────────────
   const renderModalFactura = () => (
     <div className="modal-overlay open">
@@ -807,7 +812,6 @@ function Caja({
               />
             </div>
 
-            {/* Resumen automático */}
             <div
               style={{
                 background: "var(--surface2)",
@@ -1199,7 +1203,7 @@ function Caja({
           </button>
           <button
             className={selBtn(
-              !item.soloSopa && item.conSopa === false && !!item.categoria,
+              !item.soloSopa && item.conSopa === false && !!item.categoria
             )}
             onClick={() =>
               setItem({ ...itemVacio(), soloSopa: false, conSopa: false })
@@ -1257,9 +1261,9 @@ function Caja({
                 item.categoria === "ejecutivo"
                   ? p.precio
                   : item.conSopa
-                    ? p.conSopa
-                    : p.sinSopa;
-                            const quedan = stockProteinas[p.id];
+                  ? p.conSopa
+                  : p.sinSopa;
+              const quedan = stockProteinas[p.id];
               const agotado = quedan !== undefined && quedan <= 0;
               return (
                 <button
@@ -1312,7 +1316,7 @@ function Caja({
               <button
                 key={p.id}
                 className={selBtn(
-                  !!item.principios.find((sp) => sp.id === p.id),
+                  !!item.principios.find((sp) => sp.id === p.id)
                 )}
                 onClick={() => togglePrincipio(p)}
               >
@@ -1649,7 +1653,6 @@ function Caja({
               </span>
             </div>
 
-            {/* Opción factura DESPUÉS del cobro */}
             <button
               className="btn btn-full"
               style={{ fontSize: "12px" }}
@@ -1693,21 +1696,50 @@ function Caja({
     </div>
   );
 
+  // ─── VALIDAR SI EL DÍA ESTÁ CERRADO DESDE EL DASHBOARD ───────────────────
+  if (!diaAbierto) {
+    return (
+      <div className="main active fade-in" id="tab-caja">
+        <div
+          className="card"
+          style={{
+            textAlign: "center",
+            padding: "50px 20px",
+            maxWidth: "450px",
+            margin: "40px auto",
+          }}
+        >
+          <div style={{ fontSize: "40px", marginBottom: "12px" }}>🌅</div>
+          <div
+            style={{
+              fontSize: "18px",
+              fontWeight: 700,
+              marginBottom: "8px",
+              color: "#C4742A",
+            }}
+          >
+            Caja Cerrada
+          </div>
+          <div
+            style={{
+              fontSize: "13px",
+              color: "var(--text3)",
+              marginBottom: "20px",
+              lineHeight: "1.5",
+            }}
+          >
+            Para registrar pedidos y cobrar, primero debes generar el{" "}
+            <strong>Inicio de Día</strong> desde el Dashboard principal[cite: 2].
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ─── RETURN PRINCIPAL ────────────────────────────────────────────────────
   return (
     <div className="main active fade-in" id="tab-caja">
-      {/* Barra superior */}
-      {!diaAbierto && (
-  <div className="card" style={{ textAlign: "center", padding: "40px" }}>
-    <div style={{ fontSize: "32px", marginBottom: "12px" }}>🌅</div>
-    <div style={{ fontSize: "15px", fontWeight: 500, marginBottom: "6px" }}>
-      Falta generar el inicio de día
-    </div>
-    <div style={{ fontSize: "12px", color: "var(--text3)" }}>
-      El menú se arma con lo que ingreses al iniciar el día
-    </div>
-  </div>
-)}
+      {/* Encabezado y acciones de caja */}
       <div
         style={{
           display: "flex",
@@ -1750,43 +1782,6 @@ function Caja({
           </button>
         </div>
       </div>
-
-      {/* Alertas de stock bajo */}
-      {stockConfigurado &&
-        Object.values(stock).some(
-          (s) => s.total - s.vendidas <= 2 && s.total - s.vendidas > 0,
-        ) && (
-          <div
-            className="alert-row alert-amber"
-            style={{ marginBottom: "12px" }}
-          >
-            <div className="alert-dot alert-dot-amber" />
-            <span className="alert-text">
-              Últimas porciones:{" "}
-              {Object.values(stock)
-                .filter(
-                  (s) => s.total - s.vendidas <= 2 && s.total - s.vendidas > 0,
-                )
-                .map((s) => `${s.name} (${s.total - s.vendidas})`)
-                .join(", ")}
-            </span>
-          </div>
-        )}
-      {stockConfigurado &&
-        Object.values(stock).some(
-          (s) => s.total > 0 && s.total - s.vendidas <= 0,
-        ) && (
-          <div className="alert-row alert-red" style={{ marginBottom: "12px" }}>
-            <div className="alert-dot alert-dot-red" />
-            <span className="alert-text">
-              Agotados:{" "}
-              {Object.values(stock)
-                .filter((s) => s.total > 0 && s.total - s.vendidas <= 0)
-                .map((s) => s.name)
-                .join(", ")}
-            </span>
-          </div>
-        )}
 
       {/* Layout principal */}
       <div

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { supabase } from "./supabaseClient";
 import Login from "./components/Login";
 import Topbar from "./components/Topbar";
 import Dashboard from "./components/Dashboard";
@@ -403,7 +404,7 @@ function POS() {
       {modalApertura && (
         <ModalApertura
           onCerrar={() => setModalApertura(false)}
-          onConfirmar={(datos) => {
+          onConfirmar={async (datos) => {
             setBaseCaja(datos.baseCaja);
             setSopaDelDia(datos.sopa);
             setProteinasDelDia(datos.proteinas);
@@ -417,6 +418,20 @@ function POS() {
             setModalApertura(false);
             setCaldosDelDia(datos.caldos);
             setHuevosPrep(datos.huevosPrep);
+
+            // ── CREAR TURNO EN SUPABASE ──
+            try {
+              await supabase.from("cajas_turnos").insert([
+                {
+                  monto_inicial: parseFloat(datos.baseCaja) || 0,
+                  estado: "abierta",
+                  fecha_apertura: new Date().toISOString(),
+                },
+              ]);
+            } catch (err) {
+              console.error("Error al registrar apertura en Supabase:", err);
+            }
+
             agregarAlerta(
               "verde",
               "Apertura de caja",
@@ -627,9 +642,46 @@ function POS() {
           daviplataTotal={daviplataTotal}
           gastos={gastos}
           pedidosCount={pedidosCount}
-          onConfirmar={(mercado) => {
+          onConfirmar={async (mercado) => {
             setCierreFirmado(true);
             setDiaAbierto(false);
+
+            // ── CERRAR TURNO EN SUPABASE ──
+            try {
+              // 1. Buscamos el turno abierto actual
+              const { data: turnoAbierto } = await supabase
+                .from("cajas_turnos")
+                .select("id, monto_inicial, total_ventas_efectivo")
+                .eq("estado", "abierta")
+                .order("fecha_apertura", { ascending: false })
+                .limit(1)
+                .maybeSingle();
+
+              if (turnoAbierto) {
+                const totalEfectivoEsperado =
+                  Number(turnoAbierto.monto_inicial || 0) +
+                  Number(turnoAbierto.total_ventas_efectivo || 0);
+                
+                // Conteo físico estimado con base en efectivo en caja
+                const efectivoFisico = baseCaja + (efectivoRecibido - cambioEntregado);
+                const dif = efectivoFisico - totalEfectivoEsperado;
+
+                // 2. Actualizamos la base de datos
+                await supabase
+                  .from("cajas_turnos")
+                  .update({
+                    monto_final_efectivo: efectivoFisico,
+                    monto_esperado_efectivo: totalEfectivoEsperado,
+                    diferencia: dif,
+                    estado: "cerrada",
+                    fecha_cierre: new Date().toISOString(),
+                  })
+                  .eq("id", turnoAbierto.id);
+              }
+            } catch (err) {
+              console.error("Error al cerrar turno en Supabase:", err);
+            }
+
             agregarAlerta(
               "verde",
               "Cierre generado",
