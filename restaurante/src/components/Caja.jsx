@@ -296,10 +296,10 @@ function Caja({
     setServicio(null);
   };
 
-  // ─── ACUMULAR VENTA EN EL TURNO ACTIVO DE SUPABASE ───────────────────────
+  // ─── ACUMULAR LAS VENTA EN EL TURNO QUE ESTE ACTIVO DE LA SUPABASE ───────────────────────
   const registrarVentaEnTurno = async (monto, medioPago, itemsTicket, numPedido) => {
     try {
-      // 1. Buscamos el turno abierto actual para asociar la venta
+      // se busca el turno abierto actual actibo para poder asociar la venta
       const { data: turnoAbierto } = await supabase
         .from("cajas_turnos")
         .select("id, total_ventas_efectivo, total_ventas_tarjeta, total_ventas_transferencia")
@@ -313,7 +313,7 @@ function Caja({
         return;
       }
 
-      // 2. Insertamos el NUEVO REGISTRO INDIVIDUAL en la tabla de ventas detalladas
+      // Insertamos el nuevo registro individual en la tabla de ventas detalladas
       await supabase.from("ventas_detalladas").insert([
         {
           turno_id: turnoAbierto.id,
@@ -324,7 +324,7 @@ function Caja({
         },
       ]);
 
-      // 3. (Opcional pero útil) Actualizamos también los acumulados generales del turno en cajas_turnos
+      // Actualiza los acumulados generales del turno en cajas_turnos en supabase
       let colEfectivo = Number(turnoAbierto.total_ventas_efectivo) || 0;
       let colTarjeta = Number(turnoAbierto.total_ventas_tarjeta) || 0;
       let colTransf = Number(turnoAbierto.total_ventas_transferencia) || 0;
@@ -351,7 +351,7 @@ function Caja({
   const cobrar = async () => {
     if (!puedeCobrar) return;
 
-    // 1. Declarar la variable del número de pedido aquí arriba
+    // Se declara la variable del número de pedido aquí arriba
     const numPedidoStr = String(pedidoNum).padStart(5, "0");
 
     const snapshot = {
@@ -380,7 +380,7 @@ function Caja({
       return nuevo;
     });
 
-    // 2. Registrar la venta individual y sumar el acumulado del turno en Supabase
+    // Se registra la venta individual y se suma el acumulado del turno en Supabase
     await registrarVentaEnTurno(totalTicket, tipoPago, ticket, numPedidoStr);
 
     // ── Notificar al App.js con todos los datos ──
